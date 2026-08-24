@@ -1,0 +1,27 @@
+# Moi truong va cache cuc bo
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Tep tam cua he dieu hanh va IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Ket qua chay moi cua LibSignal
+LibSignal/data/output_data/
+LibSignal/logs/
+LibSignal/final_result/
+LibSignal/paper/
+LibSignal/extras/output/
+
+# Chi luu bo du lieu cologne1 can cho thi nghiem tuan 1
+LibSignal/data/raw_data/*/
+!LibSignal/data/raw_data/cologne1/
+
+# Tai lieu Word cuc bo
+*.docx
