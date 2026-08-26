@@ -1,5 +1,0 @@
-includes:
-  - configs/tsc/fixedtime.yml
-
-world:
-  hetero: true

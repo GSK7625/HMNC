@@ -1,5 +1,0 @@
-includes:
-  - configs/tsc/maxpressure.yml
-
-world:
-  slow_start: true

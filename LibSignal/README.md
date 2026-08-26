@@ -1,151 +1,108 @@
-# LibSignal
+# SUMO Traffic Signal Control - Phase 1
 
-[Website](https://darl-libsignal.github.io/)
-GitHub Repo stars
+Project tối giản để nhóm tự cài đặt và giải thích hai thuật toán điều khiển đèn
+giao thông cơ bản:
 
-OpenAI Gymnasium-compatible environments for **traffic signal control (TSC)** with classical and reinforcement-learning baselines.
+- Fixed-Time (FT);
+- Max-Pressure (MP).
 
-**Maintained at:** [sal0-h/LibSignal](https://github.com/sal0-h/LibSignal) — standalone project with Python 3.10+ tooling, SUMO-focused workflows, and team/server setup (`setup.sh`, [docs/team_instructions.pdf](./docs/team_instructions.pdf)).
+Repository chỉ dùng SUMO/TraCI và các map SUMO có sẵn. Toàn bộ agent, trainer,
+Gym, PyTorch, CityFlow và thuật toán RL của LibSignal đã được loại bỏ để nhóm có
+thể đọc và làm chủ toàn bộ code.
 
-### Upstream LibSignal (please cite)
+## Cấu trúc
 
-This codebase is based on the open-source **[LibSignal](https://github.com/DaRL-LibSignal/LibSignal)** library by the DaRL group ([project site](https://darl-libsignal.github.io/)). We gratefully use their environments, baselines, and simulator integrations; **academic work should cite the original publication** (see [Citation](#citation) below), not only this maintained copy.
-
-
-|                         |                                                                                                                                                                                |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Original repository** | [https://github.com/DaRL-LibSignal/LibSignal](https://github.com/DaRL-LibSignal/LibSignal)                                                                                     |
-| **Paper**               | Mei, H. et al., *Libsignal: an open library for traffic signal control*, Machine Learning (2023). [doi:10.1007/s10994-023-06412-y](https://doi.org/10.1007/s10994-023-06412-y) |
-
-
-The upstream repository is largely inactive; use **this repo** for installs and day-to-day experiments.
-
-Environments cover single- and multi-intersection networks. Baselines include MaxPressure, fixed-time, SOTL, DQN, PressLight, CoLight, MPLight, and others.
-
-**Simulator focus here:** SUMO (`--world sumo`). CityFlow/OpenEngine paths exist in the codebase from upstream but are not actively tested in this repo.
-
-> **Upstream Docker (optional, not maintained here):** the upstream DaRL group publishes a
-> Docker image bundling LibSignal with two sim-to-real projects (UGAT, PromptGAT):
-> `docker pull danielda1/ugat:latest`. It is unrelated to this fork's SUMO workflow — use the
-> [install steps below](#install) for day-to-day experiments.
-
-# Install
-
-Developed and tested with **SUMO** (`--world sumo`).
-
-## Quick setup (recommended)
-
-```bash
-git clone https://github.com/sal0-h/LibSignal.git
-cd LibSignal
-chmod +x setup.sh
-./setup.sh
+```text
+run.py                         CLI chạy thí nghiệm
+src/traffic_control/
+  controllers.py              FT và MP do nhóm tự code
+  sumo_env.py                  môi trường SUMO/TraCI + xử lý pha vàng
+  experiment.py               vòng lặp mô phỏng + metric + xuất kết quả
+data/raw_data/                 các map/dataset có file .sumocfg
+tests/test_controllers.py      unit test công thức FT/MP
+docs/                          lý thuyết và kịch bản trình bày
 ```
 
-`setup.sh` creates the conda env `traffic` (Python 3.10), installs PyTorch (CUDA if available), SUMO 1.26 (`libsumo` / `traci`), `torch-geometric`, `torch-scatter` (for CoLight), and the Python packages in `requirements.txt`.
+## Yêu cầu
 
-On a shared server where system packages are already installed:
+- Python 3.10-3.12;
+- Eclipse SUMO;
+- biến môi trường `SUMO_HOME` trỏ tới thư mục SUMO.
 
-```bash
-./setup.sh --no-sudo
+Không có thư viện pip bắt buộc. `traci` và `sumolib` được lấy trực tiếp từ
+`%SUMO_HOME%/tools`.
+
+Kiểm tra môi trường:
+
+```powershell
+.\setup.ps1
 ```
 
-Activate before running experiments:
+## Chạy demo
 
-```bash
-conda activate traffic
-python run.py --task tsc --agent presslight --world sumo --network sumo1x1 --prefix test
+Benchmark cả FT và MP trên Cologne 1x1 trong 900 giây:
+
+```powershell
+.\run_demo.ps1 -Controller all -Steps 900
 ```
 
-## Manual / partial install
+Mở SUMO-GUI để xem MP:
 
-If you already have conda and CUDA, you can install pip dependencies after PyTorch and SUMO:
-
-```bash
-pip install -r requirements.txt
+```powershell
+.\run_demo.ps1 -Controller maxpressure -Steps 300 -Gui -StepDelay 0.03
 ```
 
-CoLight also needs `torch-scatter` (the setup script installs it via conda-forge). See [docs/team_instructions.pdf](./docs/team_instructions.pdf) for Colab and lab-server workflows.
+Mở SUMO-GUI để xem FT:
 
-## Optional: CityFlow
-
-Upstream LibSignal supports `--world cityflow` if [CityFlow](https://github.com/cityflow-project/CityFlow) is installed. We do not test that path here; use SUMO for experiments. A CityFlow ↔ SUMO converter lives in [common/converter.py](./common/converter.py).
-
-## Agents
-
-RL agents are imported automatically from `agent/__init__.py` when their dependencies are
-present (e.g. CoLight needs `torch_scatter` + `torch_geometric`). Classical baselines
-(`maxpressure`, `fixedtime`, `sotl`) work without those extras.
-
-**Agent status** (registered name → usable via `--agent`):
-
-| Agent | Status | Notes |
-|-------|--------|-------|
-| `maxpressure`, `fixedtime`, `sotl` | ✅ baseline | No RL deps required. |
-| `dqn`, `presslight`, `frap`, `mplight`, `magd` | ✅ RL | Standard PyTorch. |
-| `ppo_pfrl` | ✅ RL | IPPO via `pfrl`. This is the working PPO. |
-| `colight` | ✅ RL | Needs `torch_scatter` (installed by `setup.sh`; not present on the Cloud `.venv`). |
-| `maddpg_v2` | ✅ RL | The working MADDPG implementation. |
-| `ppo`, `sac`, `maddpg` | ❌ not wired | Registered in their files but **not imported** in `agent/__init__.py`, so they are not in the registry (and `ppo`/`maddpg` reference config keys that are never created). Kept for reference; use `ppo_pfrl` / `maddpg_v2` instead. |
-
-Run `bash scripts/diagnostic.sh` to print the live registry and verify your environment.
-
-# Start
-
-## Run Model Pipeline
-
-Our library has a uniform structure that empowers users to start their experiments with just one click. Users can start an experiment by setting arguments in the run.py file and start with their customized settings. The following part is the arguments provided to customize.
-
-```
-python run.py
+```powershell
+.\run_demo.ps1 -Controller fixedtime -Steps 300 -Gui -StepDelay 0.03
 ```
 
-Supporting parameters:
+Thay map SUMO khác:
 
-- `--task`: task type to run (default `tsc`).
-- `--agent`: agent type — see the [Agents](#agents) table (default `dqn`).
-- `--world`: simulator, `sumo` or `cityflow` (use `sumo`; default is `cityflow` from upstream).
-- `--network`: network name, maps to `configs/sim/<network>.cfg` (e.g. `sumo1x1`, `sumo4x4`).
-- `--prefix`: run name used in the output path.
-- `--seed`: seed for the PyTorch/NumPy backend.
-- `--ngpu`: GPU id to use; `-1` forces CPU.
-- `--interface`: SUMO backend, `libsumo` (fast, default) or `traci` (slower).
-- `--delay_type`: delay metric, `apx` (default) or `real`.
-- `--thread_num`: worker threads (CityFlow only).
-- `--dataset`: dataset handler in training (default `onfly`).
-
-# Documentation
-
-Deep-dive docs live in [`docs/`](./docs/README.md):
-
-- [docs/TRAINING_GUIDE.md](./docs/TRAINING_GUIDE.md) — train/test workflow, config system, ghost-physics baselines.
-- [docs/EFFICIENCY_AUDIT.md](./docs/EFFICIENCY_AUDIT.md) — training wall-time audit (GPU vs SUMO vs Python overhead) and speedups.
-- [docs/SUMO_NETWORKS.md](./docs/SUMO_NETWORKS.md) — catalogue of available SUMO networks.
-- [docs/SUMO_FILE_STRUCTURE_GUIDE.md](./docs/SUMO_FILE_STRUCTURE_GUIDE.md) — SUMO roadnet/flow file structure.
-- [docs/TSC_CONFIG_REPORT.md](./docs/TSC_CONFIG_REPORT.md) — code-traced reference for every `configs/tsc/*.yml` parameter.
-- [docs/SIGNAL_CONTROL_THEORY.md](./docs/SIGNAL_CONTROL_THEORY.md) — signal-control / NEMA theory + cross-network audit.
-- [docs/TECHNICAL_ANALYSIS.md](./docs/TECHNICAL_ANALYSIS.md) — architecture deep-dive.
-
-For the Cursor-Cloud agent environment, see [AGENTS.md](./AGENTS.md).
-
-# Citation
-
-If you use LibSignal (including this maintained repository) in research, **cite the original LibSignal paper and reference the upstream repository**:
-
-- **Paper:** Mei, H., Lei, X., Da, L. et al. Libsignal: an open library for traffic signal control. *Machine Learning* (2023). [https://doi.org/10.1007/s10994-023-06412-y](https://doi.org/10.1007/s10994-023-06412-y)  
-- **Code (original):** [https://github.com/DaRL-LibSignal/LibSignal](https://github.com/DaRL-LibSignal/LibSignal)
-
-A short version was also presented at the NeurIPS 2022 Workshop *Reinforcement Learning for Real Life*.
-
-```bibtex
-@article{mei2023libsignal,
-  title={Libsignal: an open library for traffic signal control},
-  author={Mei, Hao and Lei, Xiaoliang and Da, Longchao and Shi, Bin and Wei, Hua},
-  journal={Machine Learning},
-  pages={1--37},
-  year={2023},
-  publisher={Springer},
-  doi={10.1007/s10994-023-06412-y}
-}
+```powershell
+.\run_demo.ps1 -Controller all -Steps 900 `
+  -Scenario "data\raw_data\cologne3\cologne3.sumocfg"
 ```
 
+## Thuật toán nằm ở đâu?
+
+Chỉ cần đọc [`src/traffic_control/controllers.py`](src/traffic_control/controllers.py):
+
+- FT giữ pha hiện tại cho đến khi đủ `green_seconds`, sau đó chuyển tuần hoàn;
+- MP tính `P(p) = sum(N_in - N_out)` cho từng pha và chọn pha có pressure lớn
+  nhất sau thời gian xanh tối thiểu.
+
+Môi trường không quyết định thuật toán. Nó chỉ đọc map SUMO, lấy lane count,
+nhận phase mà controller chọn, xử lý 5 giây đèn vàng và gọi
+`traci.simulationStep()`.
+
+## Kết quả
+
+Mỗi lần chạy tạo:
+
+```text
+results/<timestamp>/comparison.csv
+results/<timestamp>/fixedtime/summary.json
+results/<timestamp>/fixedtime/decision_trace.csv
+results/<timestamp>/maxpressure/summary.json
+results/<timestamp>/maxpressure/decision_trace.csv
+```
+
+`decision_trace.csv` lưu action, thời gian xanh và pressure từng pha nên có thể
+dùng để giải thích trực tiếp với giảng viên.
+
+## Kiểm thử
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_controllers -v
+```
+
+## Tài liệu
+
+- [Lý thuyết và cách đọc code](docs/LY_THUYET_FT_MP.md)
+- [Kịch bản demo với giảng viên](docs/KICH_BAN_DEMO.md)
+
+Project được rút gọn từ dữ liệu/map của
+[DaRL-LibSignal/LibSignal](https://github.com/DaRL-LibSignal/LibSignal), nhưng
+controller và vòng lặp SUMO trong repository hiện tại là phần nhóm tự cài đặt.

@@ -1,3 +1,0 @@
-includes:
-  - configs/tsc/fixedtime.yml
-  - configs/tsc/realism_full_world.yml

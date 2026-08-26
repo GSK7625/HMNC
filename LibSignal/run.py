@@ -1,100 +1,145 @@
-# Pin PYTHONHASHSEED=0 for reproducible str/dict/set ordering. Hash randomization can only
-# be fixed before the interpreter starts, so re-exec once with the env var set. Guarded by
-# __main__ so importing run.py (e.g. extras/) never re-execs; runs before other imports.
-import os as _os, sys as _sys
-if __name__ == '__main__' and _os.environ.get('PYTHONHASHSEED') != '0':
-    _os.environ['PYTHONHASHSEED'] = '0'
-    _os.execv(_sys.executable, [_sys.executable] + _sys.argv)
+"""Command-line entry point for the SUMO-only FT/MP project."""
 
-import task
-import trainer
-import agent
-import dataset
-from common.registry import Registry
-from common import interface
-from common.utils import *
-from utils.logger import *
-import time
-from datetime import datetime
+from __future__ import annotations
+
 import argparse
+import json
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+from src.traffic_control.controllers import FixedTimeController, MaxPressureController
+from src.traffic_control.experiment import run_experiment, write_comparison
 
 
-# parseargs
-parser = argparse.ArgumentParser(description='Run Experiment')
-parser.add_argument('--thread_num', type=int, default=4, help='number of threads')  # used in cityflow
-parser.add_argument('--ngpu', type=str, default="-1", help='gpu to be used')  # choose gpu card
-parser.add_argument('--prefix', type=str, default='test', help="the number of prefix in this running process")
-parser.add_argument('--seed', type=int, default=None, help="global random seed for random/numpy/torch and SUMO; defaults to world.seed in the config when omitted")
-parser.add_argument('--debug', action='store_true', help='enable DEBUG logging')
-parser.add_argument('--interface', type=str, default="libsumo", choices=['libsumo','traci'], help="interface type") # libsumo(fast) or traci(slow)
-parser.add_argument('--delay_type', type=str, default="apx", choices=['apx','real'], help="method of calculating delay") # apx(approximate) or real
-
-parser.add_argument('-t', '--task', type=str, default="tsc", help="task type to run")
-parser.add_argument('-a', '--agent', type=str, default="dqn", help="agent type of agents in RL environment")
-parser.add_argument('-w', '--world', type=str, default="cityflow", choices=['cityflow','sumo'], help="simulator type")
-parser.add_argument('-n', '--network', type=str, default="cityflow1x1", help="network name")
-parser.add_argument('-d', '--dataset', type=str, default='onfly', help='type of dataset in training process')
-parser.add_argument(
-    '--no_trip_metrics',
-    action='store_true',
-    help='disable new_metrics.csv / new_metrics_meta.json export on final test (SUMO)',
-)
-
-args = parser.parse_args()
-# --ngpu -1 means CPU-only. Setting CUDA_VISIBLE_DEVICES to the literal "-1" does
-# NOT hide GPUs (Slurm MIG stays visible) and breaks agents that need CPU
-# torch_scatter (e.g. CoLight). Empty string = no CUDA devices.
-if str(args.ngpu) in ("-1", ""):
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-else:
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.ngpu)
-
-logging_level = logging.INFO
-if args.debug:
-    logging_level = logging.DEBUG
+ROOT = Path(__file__).resolve().parent
+DEFAULT_SCENARIO = ROOT / "data" / "raw_data" / "cologne1" / "cologne1.sumocfg"
 
 
-class Runner:
-    def __init__(self, pArgs):
-        """
-        instantiate runner object with processed config and register config into Registry class
-        """
-        self.config, self.duplicate_config = build_config(pArgs)
-        self.config_registry()
-
-    def config_registry(self):
-        """
-        Register config into Registry class
-        """
-
-        interface.Command_Setting_Interface(self.config)
-        interface.Logger_param_Interface(self.config)  # register logger path
-        interface.World_param_Interface(self.config)
-        if self.config['model'].get('graphic', False):
-            param = Registry.mapping['world_mapping']['setting'].param
-            if self.config['command']['world'] in ['cityflow', 'sumo']:
-                roadnet_path = param['dir'] + param['roadnetFile']
-            else:
-                roadnet_path = param['road_file_addr']
-            interface.Graph_World_Interface(roadnet_path)  # register graphic parameters in Registry class
-        interface.Logger_path_Interface(self.config)
-        # make output dir if not exist
-        if not os.path.exists(Registry.mapping['logger_mapping']['path'].path):
-            os.makedirs(Registry.mapping['logger_mapping']['path'].path)        
-        interface.Trainer_param_Interface(self.config)
-        interface.ModelAgent_param_Interface(self.config)
-
-    def run(self):
-        logger = setup_logging(logging_level)
-        self.trainer = Registry.mapping['trainer_mapping']\
-            [Registry.mapping['command_mapping']['setting'].param['task']](logger)
-        self.task = Registry.mapping['task_mapping']\
-            [Registry.mapping['command_mapping']['setting'].param['task']](self.trainer)
-        start_time = time.time()
-        self.task.run()
-        logger.info(f"Total time taken: {time.time() - start_time}")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="SUMO traffic-signal demo tự cài đặt: Fixed-Time và Max-Pressure"
+    )
+    parser.add_argument(
+        "--controller",
+        choices=["fixedtime", "maxpressure", "all"],
+        default="all",
+    )
+    parser.add_argument("--scenario", type=Path, default=DEFAULT_SCENARIO)
+    parser.add_argument("--steps", type=int, default=900)
+    parser.add_argument("--action-interval", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--yellow-seconds", type=float, default=5.0)
+    parser.add_argument("--fixed-green", type=float, default=30.0)
+    parser.add_argument("--minimum-green", type=float, default=10.0)
+    parser.add_argument("--gui", action="store_true")
+    parser.add_argument("--step-delay", type=float, default=0.0)
+    parser.add_argument("--output", type=Path, default=None)
+    args = parser.parse_args()
+    if args.steps <= 0 or args.action_interval <= 0:
+        parser.error("--steps và --action-interval phải dương")
+    if args.step_delay < 0 or args.yellow_seconds < 0:
+        parser.error("--step-delay và --yellow-seconds không được âm")
+    return args
 
 
-if __name__ == '__main__':
-    test = Runner(args)
-    test.run()
+def print_summary(summaries: list[dict[str, object]], output_dir: Path) -> None:
+    print("\n=== KẾT QUẢ SUMO FT/MP ===")
+    print("Controller | Travel time (s) | Queue (xe) | Waiting (s) | Throughput | Đổi pha")
+    print("-" * 96)
+    for item in summaries:
+        print(
+            f"{item['controller']} | "
+            f"{float(item['average_travel_time_s']):.2f} | "
+            f"{float(item['average_queue_vehicles']):.2f} | "
+            f"{float(item['average_current_waiting_s']):.2f} | "
+            f"{item['throughput']} | {item['phase_switches']}"
+        )
+    print(f"\nKết quả chi tiết: {output_dir}")
+
+
+def child_command(args: argparse.Namespace, controller: str, output: Path) -> list[str]:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--controller",
+        controller,
+        "--scenario",
+        str(args.scenario.resolve()),
+        "--steps",
+        str(args.steps),
+        "--action-interval",
+        str(args.action_interval),
+        "--seed",
+        str(args.seed),
+        "--yellow-seconds",
+        str(args.yellow_seconds),
+        "--fixed-green",
+        str(args.fixed_green),
+        "--minimum-green",
+        str(args.minimum_green),
+        "--step-delay",
+        str(args.step_delay),
+        "--output",
+        str(output),
+    ]
+    if args.gui:
+        command.append("--gui")
+    return command
+
+
+def main() -> int:
+    args = parse_args()
+    output_dir = (
+        args.output.resolve()
+        if args.output
+        else ROOT / "results" / datetime.now().strftime("%Y%m%d-%H%M%S")
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.controller == "all":
+        summaries = []
+        for controller_name in ("fixedtime", "maxpressure"):
+            subprocess.run(
+                child_command(args, controller_name, output_dir),
+                cwd=ROOT,
+                check=True,
+            )
+            summary_file = output_dir / controller_name / "summary.json"
+            summaries.append(json.loads(summary_file.read_text(encoding="utf-8")))
+        write_comparison(output_dir, summaries)
+        (ROOT / "results" / "latest.txt").write_text(
+            str(output_dir), encoding="utf-8"
+        )
+        print_summary(summaries, output_dir)
+        return 0
+
+    controller = (
+        FixedTimeController(green_seconds=args.fixed_green)
+        if args.controller == "fixedtime"
+        else MaxPressureController(minimum_green_seconds=args.minimum_green)
+    )
+    print(
+        f"Đang chạy {controller.name}: {args.scenario.resolve()} | "
+        f"seed={args.seed} | {args.steps}s"
+    )
+    summary = run_experiment(
+        controller=controller,
+        sumo_config=args.scenario,
+        steps=args.steps,
+        action_interval=args.action_interval,
+        seed=args.seed,
+        gui=args.gui,
+        yellow_seconds=args.yellow_seconds,
+        step_delay=args.step_delay,
+        output_dir=output_dir,
+    )
+    write_comparison(output_dir, [summary])
+    (ROOT / "results" / "latest.txt").write_text(str(output_dir), encoding="utf-8")
+    print_summary([summary], output_dir)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
