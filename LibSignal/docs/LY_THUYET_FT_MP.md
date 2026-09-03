@@ -31,28 +31,29 @@ lưu lượng lệch hướng hoặc thay đổi.
 Với chuyển động từ làn vào `i` sang làn ra `j`:
 
 ```text
-pressure(i, j) = N(i) - N(j)
+pressure(i, j) = N_in(i) - N_out(j)
 ```
 
-Với pha `p`:
+- `N_in(i)`: Số xe dừng chờ (halting queue) ở làn vào ngã tư cần giải tỏa.
+- `N_out(j)`: Tổng số xe trên làn thoát (downstream) để đo lường mật độ/nguy cơ tắc nghẽn hạ lưu.
+
+Với pha `p` (sau khi khử trùng lặp làn):
 
 ```text
-P(p) = sum(N(i) - N(j)) cho mọi chuyển động thuộc p
+P(p) = sum(N_in) - sum(N_out) cho mọi làn thuộc pha p
 ```
 
-Sau khi pha hiện tại đủ 10 giây xanh:
+Sau khi pha hiện tại đủ thời gian xanh tối thiểu an toàn (`minimum_green_seconds`):
 
-```text
-selected_phase = argmax P(p)
-```
-
-MP ưu tiên hướng có nhiều xe ở đầu vào và ít xe ở đầu ra. Nó thích nghi theo
-trạng thái nhưng không phải học máy.
+1. **Starvation Guard**: Nếu pha hiện tại đã xanh quá `max_green_seconds` (nếu cấu hình), ưu tiên nhường cho pha khác có áp lực lớn nhất.
+2. **Idle Protection**: Nếu không có pha nào có áp lực dương ($P(p) \le 0$, ngã tư vắng xe), giữ nguyên pha hiện tại để tránh kích hoạt đèn vàng lãng phí.
+3. **Tie-breaking Hysteresis**: Nếu pha hiện tại cũng đạt áp lực tối đa, giữ nguyên pha hiện tại để tối ưu thông lượng, tránh chuyển pha liên tục.
+4. **Argmax**: Bật pha có áp lực lớn nhất: `selected_phase = argmax P(p)`.
 
 ## Pha vàng
 
 Controller chỉ chọn pha xanh. `SumoEnvironment` tự tạo trạng thái vàng khi một
-chuyển động đang xanh phải đóng lại. Trong 5 giây vàng, môi trường không nhận
+chuyển động đang xanh phải đóng lại. Trong thời gian đèn vàng (mặc định 3.0 giây theo chuẩn RESCO/SUMO, có thể tùy biến qua `yellow_seconds`), môi trường không nhận
 thêm chuyển pha. Sau đó pha xanh mục tiêu được bật và bộ đếm xanh trở về 0.
 
 ## Metric
@@ -65,10 +66,12 @@ thêm chuyển pha. Sau đó pha xanh mục tiêu được bật và bộ đếm
 
 ## Code cần hiểu
 
-1. `controllers.py`: toàn bộ công thức FT/MP.
-2. `sumo_env.py::_load_signals`: đọc pha và lane movement từ map.
-3. `sumo_env.py::step`: xử lý xanh-vàng-xanh.
-4. `experiment.py::run_experiment`: vòng lặp quan sát-quyết định-mô phỏng.
+1. `controllers/base.py`: base protocol và công thức tính $P(p)$.
+2. `controllers/fixed_time.py`: toàn bộ thuật toán Fixed-Time.
+3. `controllers/max_pressure.py`: toàn bộ thuật toán Max-Pressure.
+4. `sumo_env.py::_load_signals`: đọc pha và lane movement từ map.
+5. `sumo_env.py::step`: xử lý xanh-vàng-xanh.
+6. `experiment.py::run_experiment`: vòng lặp quan sát-quyết định-mô phỏng.
 
 Nền tảng lý thuyết MP: [Varaiya (2013)](https://doi.org/10.1016/j.trc.2013.08.014).
 TraCI: [SUMO traffic-light tutorial](https://sumo.dlr.de/docs/Tutorials/TraCI4Traffic_Lights.html).

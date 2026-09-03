@@ -7,27 +7,27 @@ nghiệm đều do nhóm tự code, không dùng agent/trainer của LibSignal.�
 
 ## 2. Mở code FT
 
-Mở `src/traffic_control/controllers.py`, chỉ vào `FixedTimeController`:
+Mở `src/traffic_control/controllers/fixed_time.py`, chỉ vào `FixedTimeController`:
 
 “FT không đọc lane count. Đủ 30 giây xanh thì chuyển sang pha kế tiếp.”
 
 ## 3. Mở code MP
 
-Chỉ vào `calculate_phase_pressures` và `MaxPressureController`:
+Mở `src/traffic_control/controllers/max_pressure.py` (và `base.py`), chỉ vào `calculate_phase_pressures` và `MaxPressureController`:
 
 “Mỗi pha được chấm bằng tổng `N_in - N_out`. Sau minimum green 10 giây, MP chọn
 pha có điểm cao nhất.”
 
 ## 4. Chạy GUI
-
+ 
 ```powershell
-.\run_demo.ps1 -Controller maxpressure -Steps 300 -Gui -StepDelay 0.03
+python run.py -c mp -g
 ```
-
+ 
 Sau đó chạy FT với đúng tham số:
-
+ 
 ```powershell
-.\run_demo.ps1 -Controller fixedtime -Steps 300 -Gui -StepDelay 0.03
+python run.py -c ft -g
 ```
 
 ## 5. Mở decision trace

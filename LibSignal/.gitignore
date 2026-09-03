@@ -1,12 +1,26 @@
+# Byte-compiled / cache
 __pycache__/
+*.py[cod]
+
+# OS and IDE files
 *.DS_Store
+Thumbs.db
 .idea/
 .vscode/
+
+# Virtual environments
 .venv/
+
+# Experiments and Outputs
 results/
 data/output_data/
-.ipynb
-*.sh
-data/raw_data/grid4x4/*.xml
-data/raw_data/grid4x4/*.pdf
+.pytest_cache/
+
+# Notebooks and scripts
 *.ipynb
+.ipynb_checkpoints/
+*.sh
+
+# Checkpoints (giu lai q_table mau neu can)
+checkpoints/*
+!checkpoints/q_table.json

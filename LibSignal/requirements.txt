@@ -1,2 +1,3 @@
-# Không có package pip bắt buộc.
-# SUMO cung cấp traci và sumolib trong %SUMO_HOME%/tools.
+# Gói Eclipse SUMO chính thức trên PyPI (chứa toàn bộ sumo.exe, sumo-gui.exe, traci và sumolib)
+# Giúp người dùng chạy được mô phỏng ngay mà không cần cài đặt SUMO qua file MSI truyền thống
+eclipse-sumo>=1.20.0

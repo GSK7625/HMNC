@@ -13,6 +13,7 @@ Thumbs.db
 .vscode/
 
 # Ket qua chay moi cua LibSignal
+LibSignal/results/
 LibSignal/data/output_data/
 LibSignal/logs/
 LibSignal/final_result/
@@ -23,5 +24,6 @@ LibSignal/extras/output/
 LibSignal/data/raw_data/*/
 !LibSignal/data/raw_data/cologne1/
 
-# Tai lieu Word cuc bo
+# Tai lieu cuc bo (Word, PDF)
 *.docx
+*.pdf
