@@ -14,34 +14,42 @@ danh sách chuyển động được phép của từng pha.
 
 ## Fixed-Time
 
-FT không sử dụng số xe để quyết định:
+FT thực hiện tuần tự theo chu kỳ thời gian đã ấn định:
 
 ```text
-if green_elapsed < 30 giây:
+target_green = max(0, required_duration - yellow_seconds)
+if green_elapsed < target_green:
     giữ pha hiện tại
 else:
     chuyển sang (current_phase + 1) mod số pha
 ```
 
-Ưu điểm: đơn giản, xác định, không cần cảm biến. Hạn chế: không thích nghi khi
-lưu lượng lệch hướng hoặc thay đổi.
+- **Đồng bộ nhịp thời gian & Triệt tiêu trôi do đèn vàng**:
+  - Thời gian mỗi pha (`duration`) luôn được cấu hình hoặc làm tròn là **bội số chính xác của chu kỳ hành động** (`action_interval`, ví dụ 10s).
+  - Khấu trừ thời gian đèn vàng (`yellow_seconds`, mặc định 3.0s theo chuẩn RESCO/SUMO) vào ngưỡng kích hoạt: `target_green = required_duration - yellow_seconds`.
+  - Tại mốc ranh giới bước mô phỏng (ví dụ sau đúng 30s), thời gian xanh thực tế đạt $30 - 3 = 27s$, bộ điều khiển chuyển pha ngay lập tức mà không bị trôi trễ thêm một khoảng `action_interval` (10s) vô ích.
 
 ## Max-Pressure
 
-Với chuyển động từ làn vào `i` sang làn ra `j`:
+Thuật toán Max-Pressure chuẩn hóa (Varaiya 2013 / RESCO):
 
-```text
-pressure(i, j) = N_in(i) - N_out(j)
-```
+1. **Đồng nhất một đại lượng (Dimensional Consistency)**:
+   - Cả làn vào và làn thoát đều sử dụng đồng nhất một đại lượng $Q$:
+     - Ở chế độ `standard`: $Q$ là số lượng xe (`lane_vehicle_count`).
+     - Ở chế độ `density`: $Q$ là mật độ xe (`lane_density` = số xe / chiều dài làn).
 
-- `N_in(i)`: Số xe dừng chờ (halting queue) ở làn vào ngã tư cần giải tỏa.
-- `N_out(j)`: Tổng số xe trên làn thoát (downstream) để đo lường mật độ/nguy cơ tắc nghẽn hạ lưu.
+2. **Nhân tỷ lệ phân chia luồng rẽ (Turning Split Ratio)**:
+   - Nếu làn vào $u$ rẽ ra nhiều nhánh thoát $v \in Out(u)$ (ví dụ: vừa rẽ trái, vừa đi thẳng, vừa rẽ phải với số nhánh $k = |Out(u)|$):
+     - Mỗi nhánh thoát được nhân với tỷ lệ rẽ tương ứng $r(u, v) = \frac{1}{k}$ (hoặc tỷ lệ phân chia thực tế).
+     - Áp lực hạ lưu ứng với làn vào $u$ là:
+       $$Q_{out}(u) = \sum_{v \in Out(u)} r(u, v) \cdot Q(v)$$
+     - Áp lực riêng của làn vào $u$:
+       $$P(u) = Q(u) - Q_{out}(u) = Q(u) - \sum_{v \in Out(u)} r(u, v) \cdot Q(v)$$
+   - Khử triệt để hiện tượng trừ trùng lặp hạ lưu (double/triple-counting) khi một làn vào phân nhánh.
 
-Với pha `p` (sau khi khử trùng lặp làn):
-
-```text
-P(p) = sum(N_in) - sum(N_out) cho mọi làn thuộc pha p
-```
+3. **Áp lực của pha $p$**:
+   $$P(p) = \sum_{u \in In(p)} P(u)$$
+   (Nếu ở chế độ `normalized`, chia cho tổng số làn vào duy nhất của pha: $P(p) / |In(p)|$).
 
 Sau khi pha hiện tại đủ thời gian xanh tối thiểu an toàn (`minimum_green_seconds`):
 

@@ -10,6 +10,7 @@ CONTROLLER_REGISTRY.auto_discover()
 from .fixed_time import FixedTimeController
 from .max_pressure import MaxPressureController
 from .q_learning import DEFAULT_Q_TABLE_PATH, QLearningController
+from .dqn import DEFAULT_DQN_MODEL_PATH, DQNController
 
 __all__ = [
     "Controller",
@@ -22,4 +23,6 @@ __all__ = [
     "MaxPressureController",
     "QLearningController",
     "DEFAULT_Q_TABLE_PATH",
+    "DQNController",
+    "DEFAULT_DQN_MODEL_PATH",
 ]

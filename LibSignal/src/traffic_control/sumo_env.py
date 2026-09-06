@@ -78,10 +78,11 @@ from .core.observation import IntersectionObservation, TrafficSnapshot
 class _SignalRuntime:
     """Lưu trữ trạng thái nội bộ của một cụm đèn tín hiệu giao thông."""
 
-    def __init__(self, phase_states, phase_movements, incoming_lanes):
+    def __init__(self, phase_states, phase_movements, incoming_lanes, lane_lengths=None):
         self.phase_states = phase_states  # Chuỗi ký tự biểu diễn đèn (ví dụ 'GGGrrr') cho từng pha xanh
         self.phase_movements = phase_movements  # Các luồng di chuyển tương ứng mỗi pha
         self.incoming_lanes = incoming_lanes  # Danh sách các làn đi vào ngã tư
+        self.lane_lengths = lane_lengths or {}  # Chiều dài cố định của từng làn (mét)
         self.current_phase = 0  # Chỉ số pha hiện tại
         self.target_phase = 0  # Pha đích đang chuẩn bị chuyển sang (khi qua đèn vàng)
         self.green_elapsed = 0.0  # Thời gian đèn xanh đã duy trì (giây)
@@ -177,10 +178,26 @@ class SumoEnvironment:
                         incoming.add(in_lane)
                 all_movements.append(tuple(movements))
 
+            # Tập hợp danh sách các làn và đọc chiều dài làn cố định từ SUMO
+            tls_lanes = {
+                lane
+                for phase in all_movements
+                for movement in phase
+                for lane in movement
+                if lane
+            }
+            lane_lengths = {}
+            for lane in tls_lanes:
+                try:
+                    lane_lengths[lane] = float(self.connection.lane.getLength(lane))
+                except Exception:
+                    lane_lengths[lane] = 100.0
+
             runtime = _SignalRuntime(
                 phase_states=phase_states,
                 phase_movements=tuple(all_movements),
                 incoming_lanes=tuple(sorted(incoming)),
+                lane_lengths=lane_lengths,
             )
             # Khởi tạo đèn ở pha xanh đầu tiên
             self.connection.trafficlight.setRedYellowGreenState(tls_id, phase_states[0])
@@ -188,6 +205,19 @@ class SumoEnvironment:
 
         if not result:
             raise RuntimeError("Mạng lưới SUMO không chứa đèn tín hiệu giao thông nào có thể điều khiển.")
+
+        # Xác định danh sách làn thoát biên (Boundary / Sink Exit Lanes theo chuẩn Varaiya 2013):
+        # Các làn thoát không dẫn vào bất kỳ ngã tư có đèn nào trong mạng lưới
+        all_incoming = {lane for rt in result.values() for lane in rt.incoming_lanes}
+        all_outgoing = {
+            m[1]
+            for rt in result.values()
+            for phase in rt.phase_movements
+            for m in phase
+            if len(m) > 1 and m[1]
+        }
+        self.exit_lanes = {lane for lane in all_outgoing if lane not in all_incoming}
+
         return result
 
     @property
@@ -224,6 +254,11 @@ class SumoEnvironment:
                 lane: float(self.connection.lane.getWaitingTime(lane))
                 for lane in lanes
             }
+            # Mật độ xe trên từng làn (xe / mét)
+            densities = {
+                lane: counts[lane] / max(1.0, runtime.lane_lengths.get(lane, 100.0))
+                for lane in lanes
+            }
             observations[tls_id] = IntersectionObservation(
                 tls_id=tls_id,
                 current_phase=runtime.current_phase,
@@ -232,6 +267,9 @@ class SumoEnvironment:
                 phase_movements=runtime.phase_movements,
                 lane_halting_count=haltings,
                 lane_waiting_time=waiting_times,
+                lane_length=runtime.lane_lengths,
+                lane_density=densities,
+                exit_lanes=self.exit_lanes,
             )
         return observations
 
@@ -344,8 +382,12 @@ class SumoEnvironment:
     def close(self):
         """Đóng kết nối TraCI với SUMO an toàn."""
         if not self._closed:
-            self.connection.close()
-            self._closed = True
+            try:
+                self.connection.close()
+            except Exception:
+                pass
+            finally:
+                self._closed = True
 
     def __enter__(self):
         return self

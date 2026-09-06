@@ -11,6 +11,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from statistics import fmean, stdev
+import xml.etree.ElementTree as ET
 
 # Đảm bảo in tiếng Việt chuẩn trên terminal Windows
 if hasattr(sys.stdout, "reconfigure"):
@@ -20,17 +21,20 @@ if hasattr(sys.stderr, "reconfigure"):
 
 from src.traffic_control.controllers import (
     CONTROLLER_REGISTRY,
+    DQNController,
     FixedTimeController,
     MaxPressureController,
     QLearningController,
 )
 from src.traffic_control.core.config import BenchmarkConfig
 from src.traffic_control.experiment import run_experiment, write_comparison
+from src.traffic_control.visualization import generate_all_plots
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_SCENARIO = ROOT / "data" / "raw_data" / "cologne1" / "cologne1.sumocfg"
 DEFAULT_Q_TABLE = ROOT / "checkpoints" / "q_table.json"
-DEFAULT_BENCHMARK_CONTROLLERS = ["fixedtime", "maxpressure", "qlearning"]
+DEFAULT_DQN_MODEL = ROOT / "checkpoints" / "dqn_model.pt"
+DEFAULT_BENCHMARK_CONTROLLERS = ["fixedtime", "maxpressure", "qlearning", "dqn"]
 
 
 def parse_args():
@@ -74,20 +78,31 @@ def parse_args():
     parser.add_argument(
         "--max-green",
         type=float,
-        default=0.0,
-        help="Thời gian xanh tối đa G_max cho Max-Pressure chống bỏ đói pha (giây, mặc định 0: không giới hạn)",
+        default=60.0,
+        help="Thời gian xanh tối đa G_max cho Max-Pressure chống bỏ đói pha (giây, mặc định: 60.0s)",
     )
     parser.add_argument(
         "--pressure-mode",
-        choices=["standard", "halting", "normalized"],
-        default="standard",
-        help="Chế độ tính áp lực Max-Pressure: standard (chuẩn Varaiya 2013: vehicle count đồng nhất), halting (xe dừng vào vs xe chạy ra), normalized (chuẩn hóa số làn)",
+        choices=["standard", "density", "halting", "normalized"],
+        default="halting",
+        help="Chế độ tính áp lực Max-Pressure: halting (mặc định theo RESCO & Varaiya: xe dừng vào vs xe chạy ra), standard (số xe đồng nhất), density (mật độ xe đồng nhất), normalized (chuẩn hóa số làn)",
     )
     parser.add_argument("--fixed-green", type=float, default=30.0, help="Thời gian xanh cơ sở cho FT (giây)")
     parser.add_argument(
         "--proportional-splits",
         action="store_true",
-        help="Kích hoạt chia thời gian xanh Fixed-Time theo tỉ lệ số làn (xấp xỉ Webster/RESCO) thay vì ép cứng bằng nhau",
+        help="Kích hoạt tính chu kỳ tối ưu Webster C_0 (1958) và Green Splits equisaturation cho Fixed-Time",
+    )
+    parser.add_argument(
+        "--discretization-mode",
+        choices=["coarse", "refined", "fine"],
+        default="refined",
+        help="Chế độ rời rạc hóa trạng thái cho Q-Learning: coarse (3 mức), refined (5 mức chi tiết), fine (6 mức)",
+    )
+    parser.add_argument(
+        "--include-green-stage",
+        action="store_true",
+        help="Bổ sung giai đoạn thời gian xanh (green_stage) vào trạng thái Q-Learning để triệt tiêu State Aliasing",
     )
     parser.add_argument(
         "--reward-type",
@@ -105,6 +120,17 @@ def parse_args():
         type=Path,
         default=DEFAULT_Q_TABLE,
         help="Đường dẫn file lưu/nạp Q-table JSON (mặc định: checkpoints/q_table.json)",
+    )
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate cho DQN (mặc định: 0.001)")
+    parser.add_argument("--batch-size", type=int, default=32, help="Kích thước mini-batch cho DQN (mặc định: 32)")
+    parser.add_argument("--buffer-size", type=int, default=5000, help="Kích thước Replay Buffer cho DQN (mặc định: 5000)")
+    parser.add_argument("--target-update", type=int, default=20, help="Chu kỳ cập nhật target network cho DQN (mặc định: 20)")
+    parser.add_argument("--no-double-dqn", action="store_true", help="Tắt Double DQN (sử dụng DQN tiêu chuẩn)")
+    parser.add_argument(
+        "--dqn-model-path",
+        type=Path,
+        default=DEFAULT_DQN_MODEL,
+        help="Đường dẫn file lưu/nạp checkpoint DQN .pt (mặc định: checkpoints/dqn_model.pt)",
     )
     parser.add_argument(
         "--controller-args",
@@ -133,6 +159,15 @@ def parse_args():
         parser.error("--minimum-green và --max-green không được âm")
     if args.episodes <= 0:
         parser.error("--episodes phải lớn hơn hoặc bằng 1")
+
+    # Tự động gán checkpoint Q-table và DQN-model theo kịch bản nếu người dùng không chỉ định file riêng
+    if args.scenario.resolve() != DEFAULT_SCENARIO.resolve():
+        scenario_stem = args.scenario.stem
+        if args.q_table_path.resolve() == DEFAULT_Q_TABLE.resolve():
+            args.q_table_path = ROOT / "checkpoints" / f"q_table_{scenario_stem}.json"
+        if args.dqn_model_path.resolve() == DEFAULT_DQN_MODEL.resolve():
+            args.dqn_model_path = ROOT / "checkpoints" / f"dqn_model_{scenario_stem}.pt"
+
     return args
 
 
@@ -149,11 +184,15 @@ def instantiate_controller(controller_name: str, args):
     if issubclass(cls, FixedTimeController) or metadata.name == "fixedtime":
         kwargs["green_seconds"] = args.fixed_green
         kwargs["proportional_splits"] = getattr(args, "proportional_splits", False)
+        kwargs["webster_cycle"] = True
+        kwargs["action_interval"] = getattr(args, "action_interval", 10.0)
+        kwargs["yellow_seconds"] = getattr(args, "yellow_seconds", 3.0)
 
     # Xử lý tham số đặc thù của MaxPressure
     elif issubclass(cls, MaxPressureController) or metadata.name == "maxpressure":
-        kwargs["max_green_seconds"] = getattr(args, "max_green", 0.0)
-        kwargs["pressure_mode"] = getattr(args, "pressure_mode", "standard")
+        kwargs["max_green_seconds"] = getattr(args, "max_green", 60.0)
+        kwargs["pressure_mode"] = getattr(args, "pressure_mode", "halting")
+        kwargs["exclude_boundary_exits"] = True
 
     # Xử lý tham số đặc thù của QLearning
     elif issubclass(cls, QLearningController) or metadata.name == "qlearning":
@@ -164,7 +203,26 @@ def instantiate_controller(controller_name: str, args):
             "epsilon": args.epsilon if is_learning else 0.0,
             "learning": is_learning,
             "reward_type": getattr(args, "reward_type", "queue"),
+            "discretization_mode": getattr(args, "discretization_mode", "refined"),
+            "include_green_stage": getattr(args, "include_green_stage", False),
             "q_table_path": args.q_table_path,
+        })
+
+    # Xử lý tham số đặc thù của DQN
+    elif issubclass(cls, DQNController) or metadata.name == "dqn":
+        is_learning = args.train or not args.dqn_model_path.is_file()
+        kwargs.update({
+            "lr": args.lr,
+            "alpha": args.alpha if args.alpha != 0.1 else args.lr,
+            "gamma": args.gamma,
+            "epsilon": args.epsilon if is_learning else 0.0,
+            "learning": is_learning,
+            "batch_size": args.batch_size,
+            "buffer_size": args.buffer_size,
+            "target_update_interval": args.target_update,
+            "double_dqn": not getattr(args, "no_double_dqn", False),
+            "reward_type": getattr(args, "reward_type", "queue"),
+            "model_path": args.dqn_model_path,
         })
 
     # Nạp các tham số tùy biến nếu có từ --controller-args
@@ -194,11 +252,26 @@ def instantiate_controller(controller_name: str, args):
     return cls(**kwargs)
 
 
+def _format_controller_badge(item: dict) -> str:
+    """Tạo nhãn hiển thị trực quan phân biệt Heuristic và RL kèm chuẩn kỹ thuật."""
+    name = item.get("controller_name") or item.get("controller", "Unknown")
+    c_low = str(item.get("controller", "")).lower()
+    if "fixed" in c_low or "ft" in c_low:
+        return f"{name} (Webster C0)"
+    if "pressure" in c_low or "mp" in c_low:
+        return f"{name} (Varaiya MP)"
+    if "dqn" in c_low or "deep" in c_low:
+        return f"{name} (Double IDQN)"
+    if "qlearn" in c_low or "ql" in c_low:
+        return f"{name} (Tabular IDQL)"
+    return name
+
+
 def print_summary(summaries: list[dict], output_dir: Path):
     """In bảng kết quả so sánh trực quan chuẩn hóa ra màn hình terminal."""
     print("\n=== KẾT QUẢ SO SÁNH CHUẨN HÓA CÁC THUẬT TOÁN ĐIỀU KHIỂN ĐÈN ===")
     headers = [
-        ("Thuật toán", 14),
+        ("Thuật toán", 22),
         ("Thời gian đi (s)", 17),
         ("Penalized TT (s)", 17),
         ("Độ trễ TB (s)", 14),
@@ -212,7 +285,7 @@ def print_summary(summaries: list[dict], output_dir: Path):
     print("-" * len(header_str))
 
     for item in summaries:
-        name = item.get("controller_name") or item.get("controller", "Unknown")
+        name = _format_controller_badge(item)
         travel_time = f"{float(item.get('average_travel_time_s', 0.0)):.2f}"
         penalized_tt = f"{float(item.get('penalized_travel_time_s', item.get('average_travel_time_s', 0.0))):.2f}"
         delay = f"{float(item.get('average_delay_s', 0.0)):.2f}"
@@ -222,7 +295,7 @@ def print_summary(summaries: list[dict], output_dir: Path):
         switches = str(item.get("phase_switches", 0))
 
         print(
-            f"{name:<14} | "
+            f"{name:<22} | "
             f"{travel_time:>17} | "
             f"{penalized_tt:>17} | "
             f"{delay:>14} | "
@@ -231,7 +304,20 @@ def print_summary(summaries: list[dict], output_dir: Path):
             f"{comp_rate:>11} | "
             f"{switches:>8}"
         )
-    print(f"\n📁 Kết quả chi tiết đã được lưu tại: {output_dir}")
+    print("\n💡 Ghi chú kiểm chuẩn công bằng: Rule-based dùng tối ưu lý thuyết (Webster/Varaiya); RL đánh giá ở chế độ khai thác đóng băng (Inference/Frozen) trên cùng các hạt giống.")
+    print(f"📁 Kết quả chi tiết đã được lưu tại: {output_dir}")
+
+
+def _auto_generate_plots(output_dir: Path) -> None:
+    """Tự động tạo các biểu đồ khoa học chất lượng cao (300 DPI) lưu trong thư mục kết quả."""
+    try:
+        plots = generate_all_plots(output_dir)
+        if plots:
+            print("\n📈 BIỂU ĐỒ KHOA HỌC TRỰC QUAN ĐÃ ĐƯỢC TẠO TỰ ĐỘNG (300 DPI):")
+            for p in plots:
+                print(f"  ➜ {p.name}: {p.resolve()}")
+    except Exception as e:
+        print(f"⚠️ Không thể tạo biểu đồ tự động: {e}")
 
 
 def aggregate_multi_seed_results(controller_runs: dict[str, list[dict]], output_dir: Path) -> list[dict]:
@@ -294,7 +380,7 @@ def print_multi_seed_summary(aggregated: list[dict], output_dir: Path):
     """In bảng thống kê khoa học Mean ± Std qua nhiều hạt giống (seeds)."""
     print("\n=== BÁO CÁO KIỂM CHUẨN ĐA HẠT GIỐNG (MULTI-SEED BENCHMARK: Mean ± Std) ===")
     headers = [
-        ("Thuật toán", 14),
+        ("Thuật toán", 22),
         ("Penalized TT (s)", 20),
         ("Thời gian đi (s)", 20),
         ("Độ trễ TB (s)", 18),
@@ -307,7 +393,7 @@ def print_multi_seed_summary(aggregated: list[dict], output_dir: Path):
     print("-" * len(header_str))
 
     for item in aggregated:
-        name = item.get("controller_name", item.get("controller"))
+        name = _format_controller_badge(item)
         p_tt = f"{item['penalized_travel_time_mean']:.2f} ± {item['penalized_travel_time_std']:.2f}"
         tt = f"{item['average_travel_time_mean']:.2f} ± {item['average_travel_time_std']:.2f}"
         delay = f"{item['average_delay_mean']:.2f} ± {item['average_delay_std']:.2f}"
@@ -316,7 +402,7 @@ def print_multi_seed_summary(aggregated: list[dict], output_dir: Path):
         cr = f"{item['completion_rate_mean'] * 100:.1f}% ± {item['completion_rate_std'] * 100:.1f}%"
 
         print(
-            f"{name:<14} | "
+            f"{name:<22} | "
             f"{p_tt:>20} | "
             f"{tt:>20} | "
             f"{delay:>18} | "
@@ -324,7 +410,8 @@ def print_multi_seed_summary(aggregated: list[dict], output_dir: Path):
             f"{tp:>15} | "
             f"{cr:>15}"
         )
-    print(f"\n📁 Kết quả đa hạt giống khoa học đã lưu tại: {output_dir}")
+    print("\n💡 Ghi chú kiểm chuẩn công bằng: Đánh giá Mean ± Std trên các hạt giống độc lập; RL thi đấu với chính sách tối ưu đóng băng (Frozen Policy), không chịu nhiễu thăm dò ngẫu nhiên.")
+    print(f"📁 Kết quả đa hạt giống khoa học đã lưu tại: {output_dir}")
 
 
 def build_child_command(args, controller_name: str, output: Path, seed: int | None = None) -> list[str]:
@@ -341,18 +428,26 @@ def build_child_command(args, controller_name: str, output: Path, seed: int | No
         "--yellow-seconds", str(args.yellow_seconds),
         "--minimum-green", str(args.minimum_green),
         "--fixed-green", str(args.fixed_green),
-        "--pressure-mode", str(getattr(args, "pressure_mode", "standard")),
+        "--pressure-mode", str(getattr(args, "pressure_mode", "halting")),
+        "--discretization-mode", str(getattr(args, "discretization_mode", "refined")),
         "--reward-type", str(args.reward_type),
         "--alpha", str(args.alpha),
         "--gamma", str(args.gamma),
         "--epsilon", str(args.epsilon),
         "--q-table-path", str(args.q_table_path.resolve()),
+        "--lr", str(args.lr),
+        "--batch-size", str(args.batch_size),
+        "--buffer-size", str(args.buffer_size),
+        "--target-update", str(args.target_update),
+        "--dqn-model-path", str(args.dqn_model_path.resolve()),
         "--step-delay", str(args.step_delay),
         "--output", str(output),
     ]
+    if getattr(args, "include_green_stage", False):
+        command.append("--include-green-stage")
     if getattr(args, "proportional_splits", False) or args.controller == "all":
         command.append("--proportional-splits")
-    if getattr(args, "max_green", 0.0) > 0:
+    if getattr(args, "max_green", 60.0) > 0:
         command.extend(["--max-green", str(args.max_green)])
     if args.controller_args:
         command.extend(["--controller-args", args.controller_args])
@@ -361,8 +456,24 @@ def build_child_command(args, controller_name: str, output: Path, seed: int | No
     return command
 
 
+def get_scenario_tls_ids(sumocfg_path: Path) -> list[str]:
+    """Trích xuất danh sách ID các cụm đèn tín hiệu từ file .sumocfg và .net.xml."""
+    try:
+        cfg_tree = ET.parse(sumocfg_path)
+        net_node = cfg_tree.find(".//net-file")
+        if net_node is not None and "value" in net_node.attrib:
+            net_file = (sumocfg_path.parent / net_node.attrib["value"]).resolve()
+            if net_file.is_file():
+                net_tree = ET.parse(net_file)
+                return [elem.attrib["id"] for elem in net_tree.findall(".//tlLogic") if "id" in elem.attrib]
+    except Exception:
+        pass
+    return []
+
+
 def ensure_trained_q_table(args) -> None:
     """Kiểm tra và tự động huấn luyện Q-Learning nếu bảng Q chưa có hoặc chưa đủ trạng thái hội tụ."""
+    scenario_tls_ids = get_scenario_tls_ids(args.scenario)
     q_path = Path(args.q_table_path)
     need_training = False
     state_count = 0
@@ -372,30 +483,90 @@ def ensure_trained_q_table(args) -> None:
     else:
         try:
             data = json.loads(q_path.read_text(encoding="utf-8"))
-            if data and isinstance(next(iter(data.values())), dict):
-                state_count = sum(len(sub) for sub in data.values())
-            else:
-                state_count = len(data)
-            if state_count < 15:
+            if not data:
                 need_training = True
+            elif scenario_tls_ids:
+                # Kiểm tra xem các ngã tư của kịch bản mục tiêu đã có trong Q-table chưa
+                for tid in scenario_tls_ids:
+                    if tid not in data or len(data[tid]) < 10:
+                        need_training = True
+                        break
+            else:
+                if isinstance(next(iter(data.values())), dict):
+                    state_count = sum(len(sub) for sub in data.values())
+                else:
+                    state_count = len(data)
+                if state_count < 15:
+                    need_training = True
         except Exception:
             need_training = True
 
     if need_training:
+        scenario_name = args.scenario.stem
+        tls_info = f" ({', '.join(scenario_tls_ids)})" if scenario_tls_ids else ""
         print(
-            f"\n[Fair Benchmark] Phát hiện Q-table ({q_path.name}) chưa đủ độ bao phủ (hiện có {state_count} trạng thái)."
-            f"\n>>> Tự động huấn luyện nhanh 10 episodes với Epsilon Decay để Q-Learning có tri thức trước khi thi đấu..."
+            f"\n[Map-Aware Benchmark] Phát hiện Q-table ({q_path.name}) chưa đủ tri thức cho kịch bản '{scenario_name}'{tls_info}."
+            f"\n>>> Tự động kích hoạt chu trình Huấn luyện tiền thi đấu (15 episodes với Epsilon Decay) trên '{scenario_name}'..."
         )
         ctrl = QLearningController(
             minimum_green_seconds=args.minimum_green,
             alpha=args.alpha,
             gamma=args.gamma,
-            epsilon=0.5,
+            epsilon=0.8,
             learning=True,
             reward_type=getattr(args, "reward_type", "queue"),
+            discretization_mode=getattr(args, "discretization_mode", "refined"),
+            include_green_stage=getattr(args, "include_green_stage", False),
             q_table_path=q_path if q_path.is_file() else None,
         )
         train_steps = min(args.steps, 600)
+        # Tách biệt tập seed huấn luyện [101, 102, ...] với tập seed kiểm thử [0, 1, 2] để bảo đảm tính công bằng tuyệt đối
+        for ep in range(1, 16):
+            ctrl.reset()
+            run_experiment(
+                controller=ctrl,
+                sumo_config=args.scenario,
+                steps=train_steps,
+                action_interval=args.action_interval,
+                seed=100 + ep,
+                gui=False,
+                yellow_seconds=args.yellow_seconds,
+                step_delay=0.0,
+                output_dir=ROOT / "results" / "pretrain_cache",
+            )
+            eps = ctrl.decay_epsilon(decay_rate=0.75, min_epsilon=0.02)
+            print(f"  Episode huấn luyện {ep}/15 hoàn tất (epsilon={eps:.3f}).")
+        ctrl.save_q_table(q_path)
+        total_states = sum(len(sub) for sub in ctrl.q_tables.values()) if ctrl.q_tables else len(ctrl.q_table)
+        print(f"Đã cập nhật Q-table chất lượng cao với {total_states} trạng thái tại: {q_path.resolve()}\n")
+
+
+def ensure_trained_dqn_model(args) -> None:
+    """Kiểm tra và tự động huấn luyện DQN nếu mô hình chưa có checkpoint."""
+    scenario_tls_ids = get_scenario_tls_ids(args.scenario)
+    model_path = Path(args.dqn_model_path)
+
+    if not model_path.is_file():
+        scenario_name = args.scenario.stem
+        tls_info = f" ({', '.join(scenario_tls_ids)})" if scenario_tls_ids else ""
+        print(
+            f"\n[Map-Aware Benchmark] Phát hiện mô hình DQN ({model_path.name}) chưa có checkpoint cho kịch bản '{scenario_name}'{tls_info}."
+            f"\n>>> Tự động kích hoạt chu trình Huấn luyện tiền thi đấu DQN (10 episodes) trên '{scenario_name}'..."
+        )
+        ctrl = DQNController(
+            minimum_green_seconds=args.minimum_green,
+            lr=args.lr,
+            gamma=args.gamma,
+            epsilon=0.8,
+            learning=True,
+            batch_size=args.batch_size,
+            buffer_size=args.buffer_size,
+            target_update_interval=args.target_update,
+            double_dqn=not getattr(args, "no_double_dqn", False),
+            reward_type=getattr(args, "reward_type", "queue"),
+        )
+        train_steps = min(args.steps, 600)
+        # Tách biệt tập seed huấn luyện [101, 102, ...] với tập seed kiểm thử [0, 1, 2]
         for ep in range(1, 11):
             ctrl.reset()
             run_experiment(
@@ -403,16 +574,16 @@ def ensure_trained_q_table(args) -> None:
                 sumo_config=args.scenario,
                 steps=train_steps,
                 action_interval=args.action_interval,
-                seed=args.seed + ep * 10,
+                seed=100 + ep,
                 gui=False,
                 yellow_seconds=args.yellow_seconds,
                 step_delay=0.0,
                 output_dir=ROOT / "results" / "pretrain_cache",
             )
-            eps = ctrl.decay_epsilon(decay_rate=0.85, min_epsilon=0.02)
-            print(f"  Episode huấn luyện {ep}/10 hoàn tất (epsilon={eps:.3f}).")
-        ctrl.save_q_table(q_path)
-        print(f"Đã cập nhật Q-table chất lượng cao với {len(ctrl.q_table)} trạng thái tại: {q_path.resolve()}\n")
+            eps = ctrl.decay_epsilon(decay_rate=0.70, min_epsilon=0.02)
+            print(f"  Episode huấn luyện DQN {ep}/10 hoàn tất (epsilon={eps:.3f}).")
+        ctrl.save_model(model_path)
+        print(f"Đã lưu mô hình DQN tại: {model_path.resolve()}\n")
 
 
 def main():
@@ -433,9 +604,11 @@ def main():
         else:
             target_controllers = list(DEFAULT_BENCHMARK_CONTROLLERS)
 
-        # Đảm bảo Q-table đã được huấn luyện tốt nếu có Q-learning trong danh sách so sánh
+        # Đảm bảo Q-table hoặc DQN-model đã được huấn luyện tốt nếu có trong danh sách so sánh
         if any(c in ["qlearning", "ql"] for c in target_controllers):
             ensure_trained_q_table(args)
+        if any(c in ["dqn", "deepq", "deep_q"] for c in target_controllers):
+            ensure_trained_dqn_model(args)
 
         if len(seeds) > 1:
             print(f"Bắt đầu Benchmark đa hạt giống khoa học (seeds={seeds}) cho {len(target_controllers)} thuật toán...")
@@ -463,6 +636,7 @@ def main():
             aggregated = aggregate_multi_seed_results(controller_runs, output_dir)
             (ROOT / "results" / "latest.txt").write_text(str(output_dir), encoding="utf-8")
             print_multi_seed_summary(aggregated, output_dir)
+            _auto_generate_plots(output_dir)
             return 0
 
         # Nếu chỉ chạy 1 seed
@@ -480,6 +654,7 @@ def main():
         write_comparison(output_dir, summaries)
         (ROOT / "results" / "latest.txt").write_text(str(output_dir), encoding="utf-8")
         print_summary(summaries, output_dir)
+        _auto_generate_plots(output_dir)
         return 0
 
     # Chế độ chạy 1 thuật toán đơn lẻ qua nhiều seeds
@@ -501,15 +676,17 @@ def main():
         aggregated = aggregate_multi_seed_results(c_runs, output_dir)
         (ROOT / "results" / "latest.txt").write_text(str(output_dir), encoding="utf-8")
         print_multi_seed_summary(aggregated, output_dir)
+        _auto_generate_plots(output_dir)
         return 0
 
     # Chế độ chạy 1 thuật toán đơn lẻ 1 seed
     args.seed = seeds[0]
     controller = instantiate_controller(args.controller, args)
 
-    # Nếu là Q-Learning ở chế độ huấn luyện qua nhiều episodes
-    if isinstance(controller, QLearningController) and args.train and args.episodes > 1:
-        print(f"\n=== BẮT ĐẦU HUẤN LUYỆN SÂU Q-LEARNING ({args.episodes} EPISODES) ===")
+    # Nếu là Q-Learning hoặc DQN ở chế độ huấn luyện qua nhiều episodes
+    if isinstance(controller, (QLearningController, DQNController)) and args.train and args.episodes > 1:
+        algo_label = "DEEP Q-NETWORK (DQN)" if isinstance(controller, DQNController) else "Q-LEARNING"
+        print(f"\n=== BẮT ĐẦU HUẤN LUYỆN SÂU {algo_label} ({args.episodes} EPISODES) ===")
         train_dir = output_dir / "train_episodes"
         train_history = []
         min_eps = 0.02
@@ -533,7 +710,11 @@ def main():
                 output_dir=train_dir / f"ep_{ep}",
             )
             cur_eps = controller.epsilon
-            state_cnt = sum(len(sub) for sub in controller.q_tables.values()) if controller.q_tables else len(controller.q_table)
+            if isinstance(controller, DQNController):
+                state_cnt = sum(len(a.replay_buffer) for a in controller.agents.values())
+            else:
+                state_cnt = sum(len(sub) for sub in controller.q_tables.values()) if controller.q_tables else len(controller.q_table)
+
             train_history.append({
                 "episode": ep,
                 "epsilon": round(cur_eps, 4),
@@ -547,13 +728,14 @@ def main():
                 "states_discovered": state_cnt,
             })
             if ep % 5 == 0 or ep == 1 or ep == args.episodes:
+                cnt_label = "Transitions" if isinstance(controller, DQNController) else "States"
                 print(
                     f"  [Tập {ep:2d}/{args.episodes}] eps={cur_eps:.3f} | "
                     f"Độ trễ={ep_summary['average_delay_s']:6.2f}s | "
                     f"Penalized TT={ep_summary['penalized_travel_time_s']:6.2f}s | "
                     f"Hàng đợi={ep_summary['average_queue_vehicles']:5.2f} xe | "
                     f"Thông lượng={ep_summary['throughput']:3d} | "
-                    f"States={state_cnt}"
+                    f"{cnt_label}={state_cnt}"
                 )
             controller.decay_epsilon(decay_rate=decay_rate, min_epsilon=min_eps)
 
@@ -570,13 +752,18 @@ def main():
         )
         print(f"\n📁 Đã lưu toàn bộ biểu đồ học tập (Learning Curve) tại: {curve_file}")
 
-        # Lưu bảng Q đã hội tụ
-        controller.save_q_table(args.q_table_path)
-        print(f"📁 Đã lưu bảng Q hội tụ ({train_history[-1]['states_discovered']} states) tại: {args.q_table_path.resolve()}\n")
+        # Lưu mô hình / bảng Q đã hội tụ
+        if isinstance(controller, DQNController):
+            controller.save_model(args.dqn_model_path)
+            print(f"📁 Đã lưu checkpoint DQN hội tụ ({train_history[-1]['states_discovered']} transitions) tại: {args.dqn_model_path.resolve()}\n")
+        else:
+            controller.save_q_table(args.q_table_path)
+            print(f"📁 Đã lưu bảng Q hội tụ ({train_history[-1]['states_discovered']} states) tại: {args.q_table_path.resolve()}\n")
 
         # In tóm tắt tiến trình hội tụ
+        cnt_header = "Transitions" if isinstance(controller, DQNController) else "Số States"
         print("=== TIẾN TRÌNH HỘI TỤ (LEARNING CURVE SUMMARY) ===")
-        print(f"{'Episode':<10} | {'Epsilon':<8} | {'Độ trễ (s)':<12} | {'Penalized TT':<14} | {'Hàng đợi':<10} | {'Số States':<10}")
+        print(f"{'Episode':<10} | {'Epsilon':<8} | {'Độ trễ (s)':<12} | {'Penalized TT':<14} | {'Hàng đợi':<10} | {cnt_header:<10}")
         print("-" * 75)
         for row in train_history:
             if row['episode'] in [1, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50] or row['episode'] == args.episodes:
@@ -607,14 +794,18 @@ def main():
         benchmark_config=benchmark_config,
     )
 
-    # Lưu lại Q-table sau khi hoàn tất nếu đang học
+    # Lưu lại checkpoint sau khi hoàn tất nếu đang học
     if isinstance(controller, QLearningController) and controller.learning:
         controller.save_q_table(args.q_table_path)
         print(f"Đã cập nhật và lưu bảng Q tại: {args.q_table_path.resolve()}")
+    elif isinstance(controller, DQNController) and controller.learning:
+        controller.save_model(args.dqn_model_path)
+        print(f"Đã cập nhật và lưu checkpoint DQN tại: {args.dqn_model_path.resolve()}")
 
     write_comparison(output_dir, [summary])
     (ROOT / "results" / "latest.txt").write_text(str(output_dir), encoding="utf-8")
     print_summary([summary], output_dir)
+    _auto_generate_plots(output_dir)
     return 0
 
 

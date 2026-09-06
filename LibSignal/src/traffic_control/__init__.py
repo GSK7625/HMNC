@@ -16,6 +16,12 @@ from .controllers import (
 )
 from .experiment import run_experiment, write_comparison
 from .sumo_env import SumoEnvironment
+from .visualization import (
+    generate_all_plots,
+    plot_benchmark_comparison,
+    plot_learning_curve,
+    plot_time_series,
+)
 
 __all__ = [
     "BenchmarkConfig",
@@ -35,4 +41,8 @@ __all__ = [
     "run_experiment",
     "write_comparison",
     "SumoEnvironment",
+    "generate_all_plots",
+    "plot_benchmark_comparison",
+    "plot_learning_curve",
+    "plot_time_series",
 ]

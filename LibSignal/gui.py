@@ -69,6 +69,17 @@ def find_available_scenarios() -> list[tuple[str, Path]]:
     return scenarios
 
 
+def _open_path(path: Path | str) -> None:
+    """Mở file hoặc thư mục tương thích đa nền tảng (Windows, macOS, Linux)."""
+    path_str = str(path)
+    if sys.platform == "win32":
+        os.startfile(path_str)
+    elif sys.platform == "darwin":
+        subprocess.run(["open", path_str])
+    else:
+        subprocess.run(["xdg-open", path_str])
+
+
 class ChickenTracksCanvas(tk.Canvas):
     """Họa tiết dấu chân gà và hạt thóc chạy ngang phân cách giao diện."""
 
@@ -410,9 +421,9 @@ class SumoChickenApp(tk.Tk):
         self.var_mode.trace_add("write", lambda *args: self._on_mode_change())
 
         modes = [
-            ("benchmark", "🥊 So sánh Gà Chiến (Benchmark FT vs MP vs Q-Learning đối đầu trực tiếp)", True),
+            ("benchmark", "🥊 So sánh Gà Chiến (Benchmark FT vs MP vs QL vs DQN đối đầu trực tiếp)", True),
             ("single", "🏃 Cho 1 chú gà ra sân (Solo Evaluation Test)", False),
-            ("train_ql", "🧠 Luyện Gà Thông Minh (Huấn luyện Q-Learning cày cuốc qua nhiều Episode)", False),
+            ("train_ql", "🧠 Luyện Gà Thông Minh (Huấn luyện DQN / Q-Learning qua nhiều Episode)", False),
             ("test", "🧪 Kiểm tra sức khỏe đàn gà (Chạy Unit Tests tự động toàn hệ thống)", False),
         ]
         for val, text, is_bold in modes:
@@ -483,30 +494,43 @@ class SumoChickenApp(tk.Tk):
         self.cb_single_controller.pack(side=tk.LEFT, padx=6)
         self.cb_single_controller.bind("<<ComboboxSelected>>", lambda e: self._update_preview_command())
 
-        # Khung con chế độ Train QL
+        # Khung con chế độ Train RL (DQN / Q-Learning)
         self.sub_train_frame = tk.Frame(mode_frame, bg=self.c_card_inner, padx=16, pady=6, relief=tk.SOLID, bd=1)
         t_grid = tk.Frame(self.sub_train_frame, bg=self.c_card_inner)
         t_grid.pack(anchor="w")
 
-        tk.Label(t_grid, text="Số Episodes:", bg=self.c_card_inner, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", padx=4, pady=2)
-        self.var_episodes = tk.IntVar(value=5)
-        ttk.Spinbox(t_grid, from_=1, to=100, textvariable=self.var_episodes, width=8, style="Chicken.TSpinbox", command=self._update_preview_command).grid(row=0, column=1, padx=4, pady=2)
+        tk.Label(t_grid, text="Thuật toán RL:", bg=self.c_card_inner, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        self.var_train_algo = tk.StringVar(value="dqn")
+        cb_algo = ttk.Combobox(
+            t_grid,
+            textvariable=self.var_train_algo,
+            values=["dqn", "ql"],
+            state="readonly",
+            style="Chicken.TCombobox",
+            width=8,
+        )
+        cb_algo.grid(row=0, column=1, padx=4, pady=2)
+        cb_algo.bind("<<ComboboxSelected>>", lambda e: self._on_train_algo_change())
 
-        tk.Label(t_grid, text="Alpha (Học):", bg=self.c_card_inner, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=0, column=2, sticky="w", padx=10, pady=2)
-        self.var_alpha = tk.DoubleVar(value=0.1)
-        ttk.Entry(t_grid, textvariable=self.var_alpha, width=8).grid(row=0, column=3, padx=4, pady=2)
+        tk.Label(t_grid, text="Số Episodes:", bg=self.c_card_inner, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=0, column=2, sticky="w", padx=10, pady=2)
+        self.var_episodes = tk.IntVar(value=50)
+        ttk.Spinbox(t_grid, from_=1, to=100, textvariable=self.var_episodes, width=8, style="Chicken.TSpinbox", command=self._update_preview_command).grid(row=0, column=3, padx=4, pady=2)
 
-        tk.Label(t_grid, text="Gamma (Chiết khấu):", bg=self.c_card_inner, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=0, column=4, sticky="w", padx=10, pady=2)
-        self.var_gamma = tk.DoubleVar(value=0.9)
-        ttk.Entry(t_grid, textvariable=self.var_gamma, width=8).grid(row=0, column=5, padx=4, pady=2)
+        tk.Label(t_grid, text="LR / Alpha:", bg=self.c_card_inner, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=0, column=4, sticky="w", padx=10, pady=2)
+        self.var_alpha = tk.DoubleVar(value=0.001)
+        ttk.Entry(t_grid, textvariable=self.var_alpha, width=8).grid(row=0, column=5, padx=4, pady=2)
 
-        tk.Label(t_grid, text="Epsilon (Khám phá):", bg=self.c_card_inner, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="w", padx=4, pady=4)
+        tk.Label(t_grid, text="Gamma (Chiết khấu):", bg=self.c_card_inner, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=1, column=0, sticky="w", padx=4, pady=4)
+        self.var_gamma = tk.DoubleVar(value=0.95)
+        ttk.Entry(t_grid, textvariable=self.var_gamma, width=8).grid(row=1, column=1, padx=4, pady=4)
+
+        tk.Label(t_grid, text="Epsilon (Khám phá):", bg=self.c_card_inner, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=1, column=2, sticky="w", padx=10, pady=4)
         self.var_epsilon = tk.DoubleVar(value=0.05)
-        ttk.Entry(t_grid, textvariable=self.var_epsilon, width=8).grid(row=1, column=1, padx=4, pady=4)
+        ttk.Entry(t_grid, textvariable=self.var_epsilon, width=8).grid(row=1, column=3, padx=4, pady=4)
 
-        tk.Label(t_grid, text="File lưu Bảng Q:", bg=self.c_card_inner, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=1, column=2, sticky="w", padx=10, pady=4)
-        self.var_q_table = tk.StringVar(value="checkpoints/q_table.json")
-        ttk.Entry(t_grid, textvariable=self.var_q_table, width=28).grid(row=1, column=3, columnspan=3, sticky="w", padx=4, pady=4)
+        tk.Label(t_grid, text="File Checkpoint:", bg=self.c_card_inner, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=1, column=4, sticky="w", padx=10, pady=4)
+        self.var_q_table = tk.StringVar(value="checkpoints/dqn_model.pt")
+        ttk.Entry(t_grid, textvariable=self.var_q_table, width=28).grid(row=1, column=5, sticky="w", padx=4, pady=4)
 
         # 2. Khung chọn bản đồ
         map_frame = ttk.LabelFrame(scroll_content, text=" 🗺️ 2. ĐỊA BÀN HOẠT ĐỘNG (BẢN ĐỒ / SCENARIO) ", style="ChickenCard.TLabelframe")
@@ -611,7 +635,7 @@ class SumoChickenApp(tk.Tk):
         ttk.Entry(grid_p, textvariable=self.var_fixed_green, width=10).grid(row=2, column=1, sticky="w", padx=4, pady=4)
 
         tk.Label(grid_p, text="Thời gian đèn vàng (s):", bg=self.c_card, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=2, column=2, sticky="w", padx=12, pady=4)
-        self.var_yellow = tk.DoubleVar(value=5.0)
+        self.var_yellow = tk.DoubleVar(value=3.0)
         ttk.Entry(grid_p, textvariable=self.var_yellow, width=8).grid(row=2, column=3, sticky="w", padx=4, pady=4)
 
         tk.Label(grid_p, text="Random Seed:", bg=self.c_card, fg=self.c_text, font=("Segoe UI", 9, "bold")).grid(row=2, column=4, sticky="w", padx=12, pady=4)
@@ -817,6 +841,22 @@ class SumoChickenApp(tk.Tk):
         )
         self.btn_open_csv.pack(side=tk.RIGHT, padx=4)
 
+        self.btn_open_chart = tk.Button(
+            top_bar,
+            text="📈 Xem biểu đồ khoa học",
+            bg="#FFFFFF",
+            fg=self.c_text,
+            activebackground="#DCFCE7",
+            activeforeground="#166534",
+            font=("Segoe UI", 9, "bold"),
+            relief=tk.SOLID,
+            bd=1,
+            padx=10,
+            command=self._open_scientific_chart,
+            state=tk.DISABLED,
+        )
+        self.btn_open_chart.pack(side=tk.RIGHT, padx=4)
+
         table_frame = tk.Frame(self.tab_results, bg=self.c_bg)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
@@ -881,6 +921,20 @@ class SumoChickenApp(tk.Tk):
 
         self._update_preview_command()
 
+    def _on_train_algo_change(self):
+        algo = getattr(self, "var_train_algo", None)
+        if algo:
+            algo_name = algo.get()
+            if algo_name == "dqn":
+                self.var_alpha.set(0.001)
+                self.var_gamma.set(0.95)
+                self.var_q_table.set("checkpoints/dqn_model.pt")
+            else:
+                self.var_alpha.set(0.1)
+                self.var_gamma.set(0.9)
+                self.var_q_table.set("checkpoints/q_table.json")
+        self._update_preview_command()
+
     def _on_scenario_selected(self):
         name = self.var_scenario_name.get()
         if name in self.scenario_map:
@@ -919,7 +973,7 @@ class SumoChickenApp(tk.Tk):
         self.var_action_interval.set(10)
         self.var_min_green.set(10.0)
         self.var_fixed_green.set(30.0)
-        self.var_yellow.set(5.0)
+        self.var_yellow.set(3.0)
         self.var_seed.set(0)
         self.var_gui.set(False)
         self.delay_frame.pack_forget()
@@ -939,22 +993,29 @@ class SumoChickenApp(tk.Tk):
             selected_controllers = [
                 name for name, var in self.bench_vars.items() if var.get()
             ]
-            if selected_controllers and len(selected_controllers) < len(self.bench_vars):
+            if selected_controllers:
                 cmd.extend(["--controllers", ",".join(selected_controllers)])
 
         elif mode == "single":
             cmd.extend(["-c", self.var_single_controller.get()])
 
         elif mode == "train_ql":
+            algo = getattr(self, "var_train_algo", None)
+            algo_name = algo.get() if algo else "dqn"
             cmd.extend([
-                "-c", "ql",
+                "-c", algo_name,
                 "--train",
                 "--episodes", str(self.var_episodes.get()),
                 "--alpha", str(self.var_alpha.get()),
+                "--lr", str(self.var_alpha.get()),
                 "--gamma", str(self.var_gamma.get()),
                 "--epsilon", str(self.var_epsilon.get()),
-                "--q-table-path", self.var_q_table.get(),
             ])
+            ckpt = self.var_q_table.get()
+            if "dqn" in algo_name:
+                cmd.extend(["--dqn-model-path", ckpt if ckpt.endswith(".pt") else "checkpoints/dqn_model.pt"])
+            else:
+                cmd.extend(["--q-table-path", ckpt if ckpt.endswith(".json") else "checkpoints/q_table.json"])
 
         cfg_path = Path(self.var_custom_scenario_path.get())
         cmd.extend(["-m", str(cfg_path)])
@@ -986,6 +1047,16 @@ class SumoChickenApp(tk.Tk):
         if self.running_process is not None:
             messagebox.showwarning("Gà Nhắc Nhở", "Gà đang bận cày mô phỏng rồi bạn ơi!")
             return
+
+        # Kiểm tra tính hợp lệ: nếu ở chế độ Benchmark, phải chọn ít nhất 1 thuật toán
+        if self.var_mode.get() == "benchmark":
+            selected = [name for name, var in self.bench_vars.items() if var.get()]
+            if not selected:
+                messagebox.showwarning(
+                    "Gà Nhắc Nhở",
+                    "Bạn chưa chọn gà chiến nào để so tài! Vui lòng tích chọn ít nhất 1 thuật toán.",
+                )
+                return
 
         cmd = self._build_command_list()
         self._set_running_state(True)
@@ -1032,17 +1103,26 @@ class SumoChickenApp(tk.Tk):
                 text="🐔 Gà ngáp dài: \"Khò khò... Đã dừng khẩn cấp mô phỏng để gà đi ngủ một giấc!\""
             )
             self._append_log(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🛑 Đang dừng khẩn cấp cho gà nghỉ ngơi...\n", "warning")
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(self.running_process.pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except Exception:
+            if sys.platform == "win32":
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self.running_process.pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    try:
+                        self.running_process.terminate()
+                    except Exception:
+                        pass
+            else:
                 try:
                     self.running_process.terminate()
                 except Exception:
-                    pass
+                    try:
+                        self.running_process.kill()
+                    except Exception:
+                        pass
 
     def _process_log_queue(self):
         while not self.log_queue.empty():
@@ -1120,7 +1200,7 @@ class SumoChickenApp(tk.Tk):
                 self.results_tree.delete(item)
 
             if comparison_file.is_file():
-                with open(comparison_file, mode="r", encoding="utf-8") as f:
+                with open(comparison_file, mode="r", encoding="utf-8-sig") as f:
                     reader = csv.DictReader(f)
                     for idx, row in enumerate(reader):
                         c_name = row.get("controller_name") or row.get("controller") or "Unknown"
@@ -1149,6 +1229,7 @@ class SumoChickenApp(tk.Tk):
                 )
                 self.btn_open_folder.config(state=tk.NORMAL)
                 self.btn_open_csv.config(state=tk.NORMAL)
+                self.btn_open_chart.config(state=tk.NORMAL)
                 self.notebook.select(self.tab_results)
 
         except Exception as e:
@@ -1156,13 +1237,35 @@ class SumoChickenApp(tk.Tk):
 
     def _open_results_folder(self):
         if self.active_output_dir and self.active_output_dir.is_dir():
-            os.startfile(str(self.active_output_dir))
+            _open_path(self.active_output_dir)
 
     def _open_comparison_csv(self):
         if self.active_output_dir:
             csv_path = self.active_output_dir / "comparison.csv"
             if csv_path.is_file():
-                os.startfile(str(csv_path))
+                _open_path(csv_path)
+
+    def _open_scientific_chart(self):
+        if self.active_output_dir and self.active_output_dir.is_dir():
+            chart_candidates = [
+                self.active_output_dir / "benchmark_comparison.png",
+                self.active_output_dir / "traffic_time_series.png",
+                self.active_output_dir / "learning_curve.png",
+            ]
+            for chart in chart_candidates:
+                if chart.is_file():
+                    _open_path(chart)
+                    return
+            try:
+                from src.traffic_control.visualization import generate_all_plots
+                plots = generate_all_plots(self.active_output_dir)
+                if plots and plots[0].is_file():
+                    _open_path(plots[0])
+                    return
+            except Exception as e:
+                messagebox.showwarning("Thông báo", f"Không thể tạo biểu đồ: {e}")
+                return
+            messagebox.showinfo("Thông báo", "Chưa tìm thấy biểu đồ trong thư mục kết quả này.")
 
 
 def main():

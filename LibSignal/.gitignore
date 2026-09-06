@@ -21,6 +21,7 @@ data/output_data/
 .ipynb_checkpoints/
 *.sh
 
-# Checkpoints (giu lai q_table mau neu can)
+# Checkpoints (giu lai q_table va dqn_model mau)
 checkpoints/*
 !checkpoints/q_table.json
+!checkpoints/dqn_model.pt

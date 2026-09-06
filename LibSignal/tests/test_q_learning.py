@@ -246,6 +246,106 @@ class TestQLearningController(unittest.TestCase):
             new_eps = ctrl.decay_epsilon(decay_rate=0.5, min_epsilon=0.05)
         self.assertEqual(new_eps, 0.05)
 
+    def test_refined_discretization_mode(self) -> None:
+        """Kiểm tra chế độ refined discretization 5 mức độ phân giải cao."""
+        ctrl = QLearningController(discretization_mode="refined")
+        obs_empty = MockObservation(
+            tls_id="tls_1", current_phase=0, green_elapsed=15.0,
+            lane_vehicle_count={"in_1": 0, "in_2": 2}, phase_movements=self.movements
+        )
+        self.assertEqual(ctrl.discretize_observation(obs_empty), "0:0,1")
+
+        obs_heavy = MockObservation(
+            tls_id="tls_1", current_phase=1, green_elapsed=15.0,
+            lane_vehicle_count={"in_1": 12, "in_2": 25}, phase_movements=self.movements
+        )
+        # 12 xe -> mức 3 (đông), 25 xe -> mức 4 (tắc nghẽn)
+        self.assertEqual(ctrl.discretize_observation(obs_heavy), "1:3,4")
+
+    def test_transfer_priors_across_intersections(self) -> None:
+        """Kiểm tra cơ chế Transfer Priors: ngã tư mới thừa hưởng giá trị Q từ ngã tư đã học khi gặp cùng trạng thái."""
+        ctrl = QLearningController(learning=False)
+        # tls_A đã học trạng thái "0:0,1"
+        ctrl.q_tables["tls_A"] = {"0:0,1": [2.5, 8.9]}
+        obs_b = MockObservation(
+            tls_id="tls_B", current_phase=0, green_elapsed=15.0,
+            lane_vehicle_count={"in_1": 2, "in_2": 5}, phase_movements=self.movements
+        )
+        action = ctrl.select_phase(obs_b)
+        # tls_B thừa hưởng [2.5, 8.9] nên chọn action 1 thay vì action 0 (do 8.9 > 2.5)
+        self.assertEqual(action, 1)
+        self.assertEqual(ctrl.get_tls_table("tls_B")["0:0,1"], [2.5, 8.9])
+
+    def test_safe_cycling_on_unvisited_state_after_long_green(self) -> None:
+        """Kiểm tra tránh kẹt pha: khi unvisited state (tất cả Q=0) mà đã xanh quá 30s, an toàn chuyển sang pha kế tiếp."""
+        ctrl = QLearningController(learning=False)
+        obs = MockObservation(
+            tls_id="tls_1", current_phase=0, green_elapsed=35.0,  # đã xanh 35s (> 30s)
+            lane_vehicle_count={"in_1": 0, "in_2": 5}, phase_movements=self.movements
+        )
+        action = ctrl.select_phase(obs)
+        # Phải an toàn chuyển sang pha 1 thay vì bị kẹt cứng ở pha 0
+        self.assertEqual(action, 1)
+
+    def test_bellman_update_during_minimum_green(self) -> None:
+        """Kiểm tra: khi vướng G_min, Bellman update cho bước trước đó VẪN ĐƯỢC THỰC HIỆN ĐẦY ĐỦ."""
+        alpha = 0.5
+        gamma = 0.8
+        ctrl = QLearningController(
+            minimum_green_seconds=10.0,
+            alpha=alpha,
+            gamma=gamma,
+            epsilon=0.0,
+            learning=True,
+        )
+        state1 = "0:0,0"
+        ctrl.q_table[state1] = [0.0, 0.0]
+        # Bước trước: ở state1, đã chọn đổi sang pha 1 (action = 1)
+        ctrl.last_state_action["tls_1"] = (state1, 1)
+
+        # Bước hiện tại: đang ở pha 1, nhưng mới xanh 4s (< G_min = 10s)
+        obs2 = MockObservation(
+            tls_id="tls_1",
+            current_phase=1,
+            green_elapsed=4.0,  # Chưa đủ G_min!
+            lane_vehicle_count={"in_1": 6, "out_1": 0, "in_2": 4, "out_2": 0},
+            phase_movements=self.movements,
+        )
+        state2 = ctrl.discretize_observation(obs2)  # "1:1,1"
+        ctrl.q_table[state2] = [1.0, 3.0]  # max_next_q = 3.0
+
+        # Gọi select_phase khi vướng G_min
+        action = ctrl.select_phase(obs2)
+
+        # 1. Action phải bị ép giữ nguyên pha hiện tại (pha 1) vì an toàn G_min
+        self.assertEqual(action, 1)
+
+        # 2. Nhưng Bellman update của bước chuyển trước đó (state1, action 1) PHẢI ĐÃ ĐƯỢC CẬP NHẬT!
+        # switched = True -> switch_penalty = 1.0, total_veh = 6 + 4 = 10 -> reward = -11.0
+        # td_target = -11.0 + 0.8 * 3.0 = -11.0 + 2.4 = -8.6
+        # new_q = 0.0 + 0.5 * (-8.6 - 0.0) = -4.3
+        self.assertAlmostEqual(ctrl.q_table[state1][1], -4.3)
+
+        # 3. last_state_action phải ghi nhận bước hiện tại để tiếp tục chuỗi Bellman
+        self.assertEqual(ctrl.last_state_action["tls_1"], (state2, 1))
+
+    def test_fine_discretization_mode_with_green_stage(self) -> None:
+        """Kiểm tra chế độ phân giải cao fine (6 bins) kèm green_stage chống State Aliasing."""
+        ctrl = QLearningController(discretization_mode="fine", include_green_stage=True)
+        obs_early = MockObservation(
+            tls_id="tls_1", current_phase=0, green_elapsed=5.0,
+            lane_vehicle_count={"in_1": 1, "in_2": 8}, phase_movements=self.movements
+        )
+        # in_1=1 -> bin 1, in_2=8 -> bin 3, green_elapsed=5.0s -> stage 0 (early)
+        self.assertEqual(ctrl.discretize_observation(obs_early), "0:1,3:0")
+
+        obs_late = MockObservation(
+            tls_id="tls_1", current_phase=0, green_elapsed=35.0,
+            lane_vehicle_count={"in_1": 1, "in_2": 8}, phase_movements=self.movements
+        )
+        # Cùng số lượng xe nhưng thời gian xanh đã 35s -> stage 2 (late) -> không còn bị State Aliasing!
+        self.assertEqual(ctrl.discretize_observation(obs_late), "0:1,3:2")
+
 
 if __name__ == "__main__":
     unittest.main()

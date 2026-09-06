@@ -1,4 +1,4 @@
-﻿# 🚦 SUMO Traffic Signal Control Framework
+# 🚦 SUMO Traffic Signal Control Framework
 
 Hệ thống mô phỏng, huấn luyện và kiểm chuẩn khoa học (Scientific Benchmark) các thuật toán điều khiển đèn tín hiệu giao thông thông minh trên nền tảng **Eclipse SUMO** & **TraCI**.
 
@@ -17,7 +17,11 @@ Dự án được xây dựng tinh gọn, trực quan, hỗ trợ đầy đủ g
 3. **Tabular Q-Learning (QL)**:
    - Thuật toán học tăng cường phi tập trung (Decentralized Independent Q-Learning - IDQL).
    - Rời rạc hóa trạng thái hàng đợi dừng, tối ưu hàm phần thưởng theo độ dài hàng đợi/độ trễ và tích hợp hệ số phạt chuyển pha đèn liên tục (**Switch Penalty**).
-4. **Kiến trúc Plug-and-Play**:
+4. **Deep Q-Network (DQN / Double DQN)**:
+   - Thuật toán học tăng cường sâu hiện đại (Mnih et al. 2015, Hasselt et al. 2016).
+   - Biểu diễn trạng thái liên tục nhiều chiều (Continuous State Vectorization: Queue, Vehicles, Waiting Time, Pressure, One-hot Phase, Elapsed Green).
+   - Tích hợp bộ nhớ đệm tái hiện trải nghiệm (**Experience Replay Buffer**), mạng mục tiêu (**Target Network**) và tối ưu hóa Bellman chống phóng đại giá trị (**Double DQN**).
+5. **Kiến trúc Plug-and-Play**:
    - Hệ thống **Controller Registry** cho phép thêm bất kỳ thuật toán mới nào chỉ bằng decorator `@register_controller` mà không cần chỉnh sửa code cũ.
 
 ---
@@ -30,11 +34,12 @@ LibSignal/
 ├── gui.py                         # Giao diện đồ họa Dashboard (Sleepy Chicken Theme)
 ├── launch_gui.bat                 # Khởi chạy GUI 1-click tiện lợi trên Windows
 ├── setup.ps1                      # Tự động khởi tạo venv và kiểm tra môi trường SUMO
-├── requirements.txt               # Gói phụ thuộc chính (eclipse-sumo)
+├── requirements.txt               # Gói phụ thuộc chính (eclipse-sumo, torch, numpy)
 ├── assets/
 │   └── chicken_avatar.png         # Tài nguyên mascot cho giao diện GUI
 ├── checkpoints/
-│   └── q_table.json               # Trọng số mô hình Q-Learning đã hội tụ
+│   ├── q_table.json               # Trọng số mô hình Q-Learning đã hội tụ
+│   └── dqn_model.pt               # Trọng số mô hình Deep Q-Network (DQN)
 ├── src/traffic_control/
 │   ├── core/                      # Module nền tảng chuẩn hóa
 │   │   ├── config.py              # BenchmarkConfig (chuẩn hóa tham số môi trường & G_min)
@@ -45,12 +50,13 @@ LibSignal/
 │   │   ├── base.py                # BaseController, Safety Guard & tính áp lực xe P(p)
 │   │   ├── fixed_time.py          # Bộ điều khiển Fixed-Time
 │   │   ├── max_pressure.py        # Bộ điều khiển Max-Pressure
-│   │   └── q_learning.py          # Bộ điều khiển Q-Learning
+│   │   ├── q_learning.py          # Bộ điều khiển Q-Learning
+│   │   └── dqn.py                 # Bộ điều khiển Deep Q-Network (DQN)
 │   ├── sumo_env.py                # Môi trường SUMO/TraCI + tự động phát hiện SUMO_HOME
 │   └── experiment.py              # Vòng lặp mô phỏng chuẩn hóa & xuất kết quả CSV/JSON
 ├── data/
 │   └── raw_data/                  # 11 kịch bản mạng lưới giao thông thực tế (.sumocfg)
-├── tests/                         # Toàn bộ 30 unit tests kiểm định chất lượng mã nguồn
+├── tests/                         # Toàn bộ 52 unit tests kiểm định chất lượng mã nguồn
 └── docs/                          # Tài liệu lý thuyết, báo cáo RESCO và hướng dẫn mở rộng
 ```
 
@@ -130,15 +136,21 @@ Chạy kiểm chuẩn trên 3 hạt giống ngẫu nhiên (`seed=0,1,2`) để t
 python run.py --seeds 0,1,2
 ```
 
-### 3. Huấn luyện Q-Learning sâu qua nhiều episode
-Huấn luyện Q-Learning 50 episodes với cơ chế Epsilon Decay để hội tụ bảng Q:
+### 3. Huấn luyện RL sâu qua nhiều episode (Q-Learning & DQN)
 ```powershell
+# Huấn luyện Tabular Q-Learning 50 episodes:
 python run.py -c ql --train --episodes 50
+
+# Huấn luyện Deep Q-Network (DQN) 20 episodes:
+python run.py -c dqn --train --episodes 20
 ```
 
 ### 4. Mở giao diện trực quan SUMO-GUI
 Xem trực quan chuyển động xe và đèn tín hiệu trên SUMO-GUI:
 ```powershell
+# Xem Deep Q-Network (DQN) điều khiển
+python run.py -c dqn -g
+
 # Xem Max-Pressure điều khiển
 python run.py -c mp -g
 
@@ -149,7 +161,12 @@ python run.py -c ft -g
 python run.py -c ql -g
 ```
 
-### 5. Chạy trên bản đồ khác
+### 5. Benchmark toàn diện cả 4 thuật toán
+```powershell
+python run.py -c all --controllers ft,mp,ql,dqn
+```
+
+### 6. Chạy trên bản đồ khác
 ```powershell
 python run.py -m "data\raw_data\cologne3\cologne3.sumocfg"
 ```

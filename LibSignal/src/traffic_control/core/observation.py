@@ -16,6 +16,9 @@ class IntersectionObservation:
     phase_movements: tuple[tuple[tuple[str, str], ...], ...]  # Luồng xe (in_lane, out_lane) cho mỗi pha
     lane_halting_count: dict[str, int] = field(default_factory=dict)  # Số xe dừng chờ (tốc độ < 0.1 m/s) trên từng làn
     lane_waiting_time: dict[str, float] = field(default_factory=dict)  # Thời gian chờ tích lũy trên từng làn (giây)
+    lane_length: dict[str, float] = field(default_factory=dict)  # Chiều dài của từng làn đường (mét)
+    lane_density: dict[str, float] = field(default_factory=dict)  # Mật độ xe trên từng làn (xe / mét)
+    exit_lanes: set[str] = field(default_factory=set)  # Danh sách các làn thoát biên ra khỏi mạng lưới
 
     def __post_init__(self):
         self.tls_id = str(self.tls_id)
@@ -25,6 +28,14 @@ class IntersectionObservation:
             self.lane_halting_count = {}
         if self.lane_waiting_time is None:
             self.lane_waiting_time = {}
+        if self.lane_length is None:
+            self.lane_length = {}
+        if self.lane_density is None:
+            self.lane_density = {}
+        if self.exit_lanes is None:
+            self.exit_lanes = set()
+        elif isinstance(self.exit_lanes, (list, tuple)):
+            self.exit_lanes = set(self.exit_lanes)
 
 
 @dataclass
